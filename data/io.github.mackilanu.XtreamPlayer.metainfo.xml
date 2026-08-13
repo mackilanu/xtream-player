@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mackilanu.XtreamPlayer</id>
+  <name>Xtream Player</name>
+  <summary>Watch live IPTV from an Xtream Codes provider</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Xtream Player is a native GTK 4 application for browsing and watching
+      authorized live IPTV services with a modern GNOME interface.
+    </p>
+    <p>
+      It supports multiple provider profiles, categories, search, secure
+      password storage, response caching, and fullscreen playback.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.mackilanu.XtreamPlayer.desktop</launchable>
+  <url type="homepage">https://github.com/mackilanu/xtream-player</url>
+  <url type="bugtracker">https://github.com/mackilanu/xtream-player/issues</url>
+  <developer id="io.github.mackilanu">
+    <name>Xtream Player contributors</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.1" date="2026-08-13">
+      <description><p>Add double-click fullscreen toggling.</p></description>
+    </release>
+    <release version="0.1.0" date="2026-08-13">
+      <description><p>Initial public release.</p></description>
+    </release>
+  </releases>
+</component>

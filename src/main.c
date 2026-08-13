@@ -622,6 +622,12 @@ static void fullscreen_clicked(GtkButton *button, gpointer data) {
     toggle_fullscreen(data);
 }
 
+static void video_pressed(GtkGestureClick *gesture, int press_count,
+                          double x, double y, gpointer data) {
+    (void)gesture; (void)x; (void)y;
+    if (press_count == 2) toggle_fullscreen(data);
+}
+
 static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval,
                             guint keycode, GdkModifierType state, gpointer data) {
     (void)controller; (void)keycode; (void)state;
@@ -764,6 +770,10 @@ static GtkWidget *build_player(App *app) {
     gtk_picture_set_content_fit(app->video, GTK_CONTENT_FIT_CONTAIN);
     gtk_widget_set_hexpand(GTK_WIDGET(app->video), TRUE);
     gtk_widget_set_vexpand(GTK_WIDGET(app->video), TRUE);
+    GtkGesture *video_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(video_click), GDK_BUTTON_PRIMARY);
+    g_signal_connect(video_click, "pressed", G_CALLBACK(video_pressed), app);
+    gtk_widget_add_controller(GTK_WIDGET(app->video), GTK_EVENT_CONTROLLER(video_click));
     GtkBox *controls = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12));
     gtk_widget_add_css_class(GTK_WIDGET(controls), "player-controls");
     gtk_widget_set_margin_top(GTK_WIDGET(controls), 12);

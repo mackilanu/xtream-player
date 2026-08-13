@@ -2,8 +2,10 @@
 Name=Xtream Player
 Comment=Watch IPTV from an Xtream Codes provider
 Exec=xtream-player
-Icon=video-display-symbolic
+Icon=io.github.mackilanu.XtreamPlayer
 Terminal=false
 Type=Application
 Categories=AudioVideo;Video;GTK;
 Keywords=IPTV;Xtream;Live;TV;
+StartupNotify=true
+StartupWMClass=io.github.mackilanu.XtreamPlayer

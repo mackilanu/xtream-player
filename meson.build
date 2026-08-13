@@ -1,4 +1,4 @@
-project('xtream-player', 'c', version: '0.1.0', default_options: ['c_std=c11', 'warning_level=2'])
+project('xtream-player', 'c', version: '0.1.1', default_options: ['c_std=c11', 'warning_level=2'])
 
 dependencies = [
   dependency('gtk4', version: '>=4.10'),
@@ -15,3 +15,9 @@ executable('xtream-player', 'src/main.c',
 
 install_data('data/io.github.mackilanu.XtreamPlayer.desktop',
   install_dir: get_option('datadir') / 'applications')
+
+install_data('data/icons/hicolor/512x512/apps/io.github.mackilanu.XtreamPlayer.png',
+  install_dir: get_option('datadir') / 'icons' / 'hicolor' / '512x512' / 'apps')
+
+install_data('data/io.github.mackilanu.XtreamPlayer.metainfo.xml',
+  install_dir: get_option('datadir') / 'metainfo')
