@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Xtream Player
+Comment=Watch IPTV from an Xtream Codes provider
+Exec=xtream-player
+Icon=video-display-symbolic
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;GTK;
+Keywords=IPTV;Xtream;Live;TV;

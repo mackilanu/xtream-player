@@ -1,0 +1,23 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fedora:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: >-
+          dnf install -y gcc meson ninja-build gtk4-devel libadwaita-devel
+          libsoup3-devel json-glib-devel gstreamer1-devel
+      - name: Configure
+        run: meson setup build
+      - name: Build
+        run: meson compile -C build
