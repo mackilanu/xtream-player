@@ -1,4 +1,4 @@
-project('xtream-player', 'c', version: '0.1.1', default_options: ['c_std=c11', 'warning_level=2'])
+project('xtream-player', 'c', version: '0.2.0', default_options: ['c_std=c11', 'warning_level=2'])
 
 dependencies = [
   dependency('gtk4', version: '>=4.10'),

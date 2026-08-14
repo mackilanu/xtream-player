@@ -2,7 +2,7 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-version="0.1.1"
+version="0.2.0"
 rpm_root="${project_root}/build/rpmbuild"
 
 if ! command -v rpmbuild >/dev/null; then

@@ -13,9 +13,12 @@ Only use playlists and streams you are authorized to access.
 
 - Native GTK 4 and libadwaita interface
 - Xtream Codes-compatible live TV
+- Provider movie and series catalogs with category filtering and search
+- On-demand playback, episode selection, seeking, and automatic resume
 - Multiple named provider profiles
 - Password storage in GNOME Keyring
 - Provider categories and channel search
+- Per-playlist Live TV favorites with a dedicated favorites filter
 - Six-hour cache with offline fallback
 - Non-blocking network requests and virtualized channel lists
 - System, light, and dark appearance modes
@@ -74,9 +77,13 @@ worker thread.
 
 ## Project status
 
-Xtream Player is an early-stage community project. VOD, series, EPG, favorites,
-and packaging are planned but not implemented yet. Bug reports and focused pull
-requests are welcome.
+Xtream Player is an early-stage community project. EPG, favorites, richer
+poster/detail views, and distribution packaging are still evolving. Bug reports
+and focused pull requests are welcome.
+
+Movie and series metadata comes directly from the configured Xtream provider;
+no separate metadata API key is required. Available artwork, ratings, titles,
+and episode details depend on the provider's catalog data.
 
 ## Privacy and legal use
 

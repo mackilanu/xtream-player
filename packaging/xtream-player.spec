@@ -1,5 +1,5 @@
 Name:           xtream-player
-Version:        0.1.1
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Native GTK 4 player for Xtream Codes IPTV providers
 
@@ -48,6 +48,10 @@ appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/io.github
 %{_datadir}/metainfo/io.github.mackilanu.XtreamPlayer.metainfo.xml
 
 %changelog
+* Fri Aug 14 2026 Marcus Andersson <18679427+mackilanu@users.noreply.github.com> - 0.2.0-1
+- Add provider movies, series, episodes, seeking, and playback resume
+- Add persistent per-playlist Live TV favorites and reliable fullscreen control hiding
+
 * Thu Aug 13 2026 Marcus Andersson <18679427+mackilanu@users.noreply.github.com> - 0.1.1-1
 - Toggle fullscreen by double-clicking the video
 

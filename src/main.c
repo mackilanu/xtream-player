@@ -3,6 +3,7 @@
 #include <json-glib/json-glib.h>
 #include <libsoup/soup.h>
 #include <glib/gstdio.h>
+#include <math.h>
 
 typedef struct {
     char *name;
@@ -11,8 +12,20 @@ typedef struct {
     char *category_id;
 } Channel;
 
+typedef struct {
+    char *name, *stream_id, *icon, *category_id, *extension, *rating, *year;
+    gboolean series;
+} MediaItem;
+
 typedef struct { char *name, *id; } Category;
-typedef struct { GPtrArray *channels, *categories; } LoadResult;
+typedef struct {
+    GPtrArray *channels, *categories;
+    GPtrArray *movies, *movie_categories;
+    GPtrArray *series, *series_categories;
+} LoadResult;
+typedef struct {
+    GPtrArray *movies, *movie_categories, *series, *series_categories;
+} MediaLoadResult;
 typedef struct { char *id, *name, *server, *user; } Profile;
 
 typedef struct {
@@ -32,21 +45,32 @@ typedef struct {
     GtkListView *channel_list;
     GtkStringList *channel_model;
     GtkStringFilter *channel_filter;
+    AdwViewStack *catalog_stack;
+    GtkStringList *movie_model, *series_model;
+    GtkStringFilter *movie_filter, *series_filter;
+    GtkDropDown *movie_category_picker, *series_category_picker;
+    GtkListView *movie_list, *series_list;
     GtkPicture *video;
     GtkLabel *now_playing;
     GtkButton *play_button;
     GtkButton *mute_button;
     GtkButton *fullscreen_button;
+    GtkScale *progress_scale;
     GtkRevealer *player_controls;
     GtkWidget *video_surface;
     guint controls_timeout;
+    gint64 controls_last_motion;
+    double pointer_x, pointer_y;
+    gboolean pointer_known;
     AdwToolbarView *player_toolbar;
     GtkWidget *sidebar;
     GtkRevealer *toast_revealer;
     GtkLabel *toast_label;
     GPtrArray *channels;
     GPtrArray *categories;
+    GPtrArray *movies, *movie_categories, *series, *series_categories;
     GPtrArray *profiles;
+    GHashTable *favorites;
     char *profile_id;
     GSettings *interface_settings;
     guint theme_mode;
@@ -54,6 +78,10 @@ typedef struct {
     gboolean playing;
     gboolean muted;
     gboolean fullscreen;
+    gboolean on_demand;
+    gboolean updating_progress;
+    guint progress_timer;
+    char *progress_key;
     char *base_url;
     char *user;
     char *pass;
@@ -65,6 +93,8 @@ typedef struct {
     char *pass;
 } LoginRequest;
 
+typedef struct { LoginRequest login; char *series_id; char *series_name; } SeriesRequest;
+
 static void channel_free(gpointer data) {
     Channel *channel = data;
     g_free(channel->name);
@@ -72,6 +102,12 @@ static void channel_free(gpointer data) {
     g_free(channel->icon);
     g_free(channel->category_id);
     g_free(channel);
+}
+
+static void media_item_free(gpointer data) {
+    MediaItem *item = data;
+    g_free(item->name); g_free(item->stream_id); g_free(item->icon);
+    g_free(item->category_id); g_free(item->extension); g_free(item->rating); g_free(item->year); g_free(item);
 }
 
 static void category_free(gpointer data) {
@@ -89,6 +125,19 @@ static void load_result_free(gpointer data) {
     LoadResult *result = data;
     if (result->channels) g_ptr_array_unref(result->channels);
     if (result->categories) g_ptr_array_unref(result->categories);
+    if (result->movies) g_ptr_array_unref(result->movies);
+    if (result->movie_categories) g_ptr_array_unref(result->movie_categories);
+    if (result->series) g_ptr_array_unref(result->series);
+    if (result->series_categories) g_ptr_array_unref(result->series_categories);
+    g_free(result);
+}
+
+static void media_load_result_free(gpointer data) {
+    MediaLoadResult *result = data;
+    if (result->movies) g_ptr_array_unref(result->movies);
+    if (result->movie_categories) g_ptr_array_unref(result->movie_categories);
+    if (result->series) g_ptr_array_unref(result->series);
+    if (result->series_categories) g_ptr_array_unref(result->series_categories);
     g_free(result);
 }
 
@@ -98,6 +147,12 @@ static void login_request_free(gpointer data) {
     g_free(request->user);
     g_free(request->pass);
     g_free(request);
+}
+
+static void series_request_free(gpointer data) {
+    SeriesRequest *request = data;
+    g_free(request->login.base_url); g_free(request->login.user); g_free(request->login.pass);
+    g_free(request->series_id); g_free(request->series_name); g_free(request);
 }
 
 static char *normalize_server(const char *server) {
@@ -182,14 +237,63 @@ static JsonParser *fetch_api(LoginRequest *request, const char *action, GError *
         g_object_unref(parser);
         return NULL;
     }
-    JsonNode *root = json_parser_get_root(parser);
-    if (!JSON_NODE_HOLDS_ARRAY(root)) {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                            "Login failed or the provider returned an unexpected response.");
-        g_object_unref(parser);
-        return NULL;
-    }
     return parser;
+}
+
+static char *json_value_string(JsonObject *object, const char *member) {
+    if (!json_object_has_member(object, member)) return g_strdup("");
+    JsonNode *node = json_object_get_member(object, member);
+    if (JSON_NODE_HOLDS_VALUE(node)) {
+        GType type = json_node_get_value_type(node);
+        if (type == G_TYPE_STRING) return g_strdup(json_node_get_string(node));
+        if (type == G_TYPE_INT64 || type == G_TYPE_INT || type == G_TYPE_UINT64)
+            return g_strdup_printf("%" G_GINT64_FORMAT, json_node_get_int(node));
+    }
+    return g_strdup("");
+}
+
+static char *json_string_or(JsonObject *object, const char *member, const char *fallback) {
+    g_autofree char *value = json_value_string(object, member);
+    return value[0] ? g_strdup(value) : g_strdup(fallback);
+}
+
+static GPtrArray *parse_categories(JsonParser *parser) {
+    GPtrArray *categories = g_ptr_array_new_with_free_func(category_free);
+    JsonNode *root = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_ARRAY(root)) return categories;
+    JsonArray *array = json_node_get_array(root);
+    for (guint i = 0; i < json_array_get_length(array); i++) {
+        JsonObject *item = json_array_get_object_element(array, i);
+        if (!item) continue;
+        Category *category = g_new0(Category, 1);
+        category->name = g_strdup(json_object_get_string_member_with_default(item, "category_name", "Other"));
+        category->id = json_value_string(item, "category_id");
+        g_ptr_array_add(categories, category);
+    }
+    return categories;
+}
+
+static GPtrArray *parse_media(JsonParser *parser, gboolean series) {
+    GPtrArray *items = g_ptr_array_new_with_free_func(media_item_free);
+    JsonNode *root = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_ARRAY(root)) return items;
+    JsonArray *array = json_node_get_array(root);
+    for (guint i = 0; i < json_array_get_length(array); i++) {
+        JsonObject *object = json_array_get_object_element(array, i);
+        if (!object) continue;
+        MediaItem *item = g_new0(MediaItem, 1);
+        item->series = series;
+        item->name = g_strdup(json_object_get_string_member_with_default(object, "name", "Untitled"));
+        item->stream_id = json_value_string(object, series ? "series_id" : "stream_id");
+        item->icon = json_string_or(object, series ? "cover" : "stream_icon", "");
+        item->category_id = json_value_string(object, "category_id");
+        item->extension = json_string_or(object, "container_extension", "mp4");
+        item->rating = json_string_or(object, "rating", "");
+        item->year = json_string_or(object, "releaseDate", "");
+        if (!item->year[0]) { g_free(item->year); item->year = json_string_or(object, "release_date", ""); }
+        if (item->stream_id[0]) g_ptr_array_add(items, item); else media_item_free(item);
+    }
+    return items;
 }
 
 static LoadResult *fetch_channels(LoginRequest *request, GError **error) {
@@ -198,6 +302,12 @@ static LoadResult *fetch_channels(LoginRequest *request, GError **error) {
     g_autoptr(JsonParser) category_parser = fetch_api(request, "get_live_categories", error);
     if (!category_parser) return NULL;
 
+    if (!JSON_NODE_HOLDS_ARRAY(json_parser_get_root(channel_parser)) ||
+        !JSON_NODE_HOLDS_ARRAY(json_parser_get_root(category_parser))) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "Login failed or the provider returned an unexpected response.");
+        return NULL;
+    }
     LoadResult *result = g_new0(LoadResult, 1);
     result->channels = g_ptr_array_new_with_free_func(channel_free);
     result->categories = g_ptr_array_new_with_free_func(category_free);
@@ -213,15 +323,26 @@ static LoadResult *fetch_channels(LoginRequest *request, GError **error) {
         channel->category_id = g_strdup(json_object_get_string_member_with_default(item, "category_id", ""));
         g_ptr_array_add(result->channels, channel);
     }
-    array = json_node_get_array(json_parser_get_root(category_parser));
-    for (guint i = 0; i < json_array_get_length(array); i++) {
-        JsonObject *item = json_array_get_object_element(array, i);
-        if (!item) continue;
-        Category *category = g_new0(Category, 1);
-        category->name = g_strdup(json_object_get_string_member_with_default(item, "category_name", "Other"));
-        category->id = g_strdup(json_object_get_string_member_with_default(item, "category_id", ""));
-        g_ptr_array_add(result->categories, category);
-    }
+    g_ptr_array_unref(result->categories);
+    result->categories = parse_categories(category_parser);
+
+    return result;
+}
+
+static MediaLoadResult *fetch_media(LoginRequest *request, GError **error) {
+    g_autoptr(JsonParser) movie_parser = fetch_api(request, "get_vod_streams", error);
+    if (!movie_parser) return NULL;
+    g_autoptr(JsonParser) movie_category_parser = fetch_api(request, "get_vod_categories", error);
+    if (!movie_category_parser) return NULL;
+    g_autoptr(JsonParser) series_parser = fetch_api(request, "get_series", error);
+    if (!series_parser) return NULL;
+    g_autoptr(JsonParser) series_category_parser = fetch_api(request, "get_series_categories", error);
+    if (!series_category_parser) return NULL;
+    MediaLoadResult *result = g_new0(MediaLoadResult, 1);
+    result->movies = parse_media(movie_parser, FALSE);
+    result->movie_categories = parse_categories(movie_category_parser);
+    result->series = parse_media(series_parser, TRUE);
+    result->series_categories = parse_categories(series_category_parser);
     return result;
 }
 
@@ -234,38 +355,136 @@ static void connect_worker(GTask *task, gpointer source, gpointer task_data, GCa
     else g_task_return_error(task, error);
 }
 
+static void media_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cancel) {
+    (void)source; (void)cancel;
+    GError *error = NULL;
+    MediaLoadResult *media = fetch_media(task_data, &error);
+    if (media) g_task_return_pointer(task, media, media_load_result_free);
+    else g_task_return_error(task, error);
+}
+
+static char *favorites_path(void) {
+    return g_build_filename(g_get_user_data_dir(), "xtream-player", "favorites.ini", NULL);
+}
+
+static void load_favorites(App *app) {
+    if (app->favorites) g_hash_table_remove_all(app->favorites);
+    else app->favorites = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    if (!app->profile_id) return;
+    g_autoptr(GKeyFile) file = g_key_file_new();
+    g_autofree char *path = favorites_path();
+    if (!g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL)) return;
+    gsize count = 0;
+    g_auto(GStrv) ids = g_key_file_get_string_list(file, "favorites", app->profile_id, &count, NULL);
+    for (gsize i = 0; ids && i < count; i++) g_hash_table_add(app->favorites, g_strdup(ids[i]));
+}
+
+static void save_favorites(App *app) {
+    if (!app->profile_id || !app->favorites) return;
+    g_autoptr(GKeyFile) file = g_key_file_new();
+    g_autofree char *path = favorites_path();
+    g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL);
+    g_autoptr(GPtrArray) ids = g_ptr_array_new();
+    GHashTableIter iter;
+    gpointer key;
+    g_hash_table_iter_init(&iter, app->favorites);
+    while (g_hash_table_iter_next(&iter, &key, NULL)) g_ptr_array_add(ids, key);
+    const char *empty = NULL;
+    g_key_file_set_string_list(file, "favorites", app->profile_id,
+        ids->len ? (const char * const *)ids->pdata : &empty, ids->len);
+    g_autofree char *directory = g_path_get_dirname(path);
+    g_mkdir_with_parents(directory, 0700);
+    g_key_file_save_to_file(file, path, NULL);
+}
+
+static void rebuild_channel_model(App *app);
+
+static void favorite_toggled(GtkToggleButton *button, gpointer data) {
+    App *app = data;
+    if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "binding"))) return;
+    Channel *channel = g_object_get_data(G_OBJECT(button), "channel");
+    if (!channel) return;
+    if (gtk_toggle_button_get_active(button))
+        g_hash_table_add(app->favorites, g_strdup(channel->stream_id));
+    else
+        g_hash_table_remove(app->favorites, channel->stream_id);
+    gtk_button_set_icon_name(GTK_BUTTON(button), gtk_toggle_button_get_active(button)
+                             ? "starred-symbolic" : "non-starred-symbolic");
+    save_favorites(app);
+    if (gtk_drop_down_get_selected(app->category_picker) == 1) rebuild_channel_model(app);
+}
+
 static void channel_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data) {
-    (void)factory; (void)data;
+    (void)factory;
+    App *app = data;
     GtkBox *box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12));
     gtk_widget_set_margin_top(GTK_WIDGET(box), 10);
     gtk_widget_set_margin_bottom(GTK_WIDGET(box), 10);
     gtk_widget_set_margin_start(GTK_WIDGET(box), 12);
     gtk_widget_set_margin_end(GTK_WIDGET(box), 12);
     GtkWidget *icon = gtk_image_new_from_icon_name("video-display-symbolic");
+    GtkBox *labels = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 2));
     GtkWidget *label = gtk_label_new(NULL);
+    GtkWidget *subtitle = gtk_label_new(NULL);
     gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
     gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
     gtk_widget_set_hexpand(label, TRUE);
+    gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0f);
+    gtk_widget_add_css_class(subtitle, "dim-label");
+    gtk_box_append(labels, label);
+    gtk_box_append(labels, subtitle);
+    gtk_widget_set_hexpand(GTK_WIDGET(labels), TRUE);
     gtk_box_append(box, icon);
-    gtk_box_append(box, label);
+    gtk_box_append(box, GTK_WIDGET(labels));
+    GtkToggleButton *favorite = GTK_TOGGLE_BUTTON(gtk_toggle_button_new());
+    gtk_button_set_icon_name(GTK_BUTTON(favorite), "non-starred-symbolic");
+    gtk_widget_set_tooltip_text(GTK_WIDGET(favorite), "Add to favorites");
+    gtk_widget_add_css_class(GTK_WIDGET(favorite), "flat");
+    g_signal_connect(favorite, "toggled", G_CALLBACK(favorite_toggled), app);
+    gtk_box_append(box, GTK_WIDGET(favorite));
     gtk_box_append(box, gtk_image_new_from_icon_name("media-playback-start-symbolic"));
     g_object_set_data(G_OBJECT(box), "title-label", label);
+    g_object_set_data(G_OBJECT(box), "subtitle-label", subtitle);
+    g_object_set_data(G_OBJECT(box), "favorite-button", favorite);
     gtk_list_item_set_child(item, GTK_WIDGET(box));
 }
 
 static void channel_item_bind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data) {
-    (void)factory; (void)data;
+    (void)factory;
+    App *app = data;
     GtkStringObject *object = GTK_STRING_OBJECT(gtk_list_item_get_item(item));
     GtkWidget *box = gtk_list_item_get_child(item);
     gtk_label_set_text(GTK_LABEL(g_object_get_data(G_OBJECT(box), "title-label")),
                        gtk_string_object_get_string(object));
+    GtkLabel *subtitle = GTK_LABEL(g_object_get_data(G_OBJECT(box), "subtitle-label"));
+    MediaItem *media = g_object_get_data(G_OBJECT(object), "media-item");
+    Channel *channel = g_object_get_data(G_OBJECT(object), "channel");
+    GtkToggleButton *favorite = GTK_TOGGLE_BUTTON(g_object_get_data(G_OBJECT(box), "favorite-button"));
+    g_object_set_data(G_OBJECT(favorite), "binding", GINT_TO_POINTER(1));
+    g_object_set_data(G_OBJECT(favorite), "channel", channel);
+    gtk_widget_set_visible(GTK_WIDGET(favorite), channel != NULL);
+    gtk_toggle_button_set_active(favorite, channel && app && app->favorites &&
+                                 g_hash_table_contains(app->favorites, channel->stream_id));
+    gtk_button_set_icon_name(GTK_BUTTON(favorite), gtk_toggle_button_get_active(favorite)
+                             ? "starred-symbolic" : "non-starred-symbolic");
+    g_object_set_data(G_OBJECT(favorite), "binding", GINT_TO_POINTER(0));
+    if (media) {
+        g_autofree char *details = g_strdup_printf("%s%s%s", media->series ? "Series" : "Movie",
+            media->rating && media->rating[0] ? "  ★ " : "",
+            media->rating && media->rating[0] ? media->rating : "");
+        gtk_label_set_text(subtitle, details);
+        gtk_widget_set_visible(GTK_WIDGET(subtitle), TRUE);
+    } else {
+        gtk_widget_set_visible(GTK_WIDGET(subtitle), FALSE);
+    }
 }
 
 static void rebuild_channel_model(App *app) {
     guint selected = gtk_drop_down_get_selected(app->category_picker);
     const char *category_id = NULL;
-    if (selected > 0 && app->categories && selected - 1 < app->categories->len)
-        category_id = ((Category *)g_ptr_array_index(app->categories, selected - 1))->id;
+    gboolean favorites_only = selected == 1;
+    if (selected > 1 && app->categories && selected - 2 < app->categories->len)
+        category_id = ((Category *)g_ptr_array_index(app->categories, selected - 2))->id;
     gtk_string_list_splice(app->channel_model, 0,
                            g_list_model_get_n_items(G_LIST_MODEL(app->channel_model)), NULL);
     if (!app->channels) return;
@@ -273,6 +492,8 @@ static void rebuild_channel_model(App *app) {
     g_autoptr(GPtrArray) visible = g_ptr_array_new();
     for (guint i = 0; i < app->channels->len; i++) {
         Channel *channel = g_ptr_array_index(app->channels, i);
+        if (favorites_only && (!app->favorites ||
+            !g_hash_table_contains(app->favorites, channel->stream_id))) continue;
         if (category_id && g_strcmp0(category_id, channel->category_id) != 0) continue;
         g_ptr_array_add(names, channel->name);
         g_ptr_array_add(visible, channel);
@@ -288,6 +509,44 @@ static void rebuild_channel_model(App *app) {
 static void category_changed(GObject *object, GParamSpec *pspec, gpointer data) {
     (void)object; (void)pspec;
     rebuild_channel_model(data);
+}
+
+static void rebuild_media_model(GPtrArray *items, GPtrArray *categories,
+                                GtkDropDown *picker, GtkStringList *model) {
+    guint selected = gtk_drop_down_get_selected(picker);
+    const char *category_id = NULL;
+    if (selected > 0 && categories && selected - 1 < categories->len)
+        category_id = ((Category *)g_ptr_array_index(categories, selected - 1))->id;
+    gtk_string_list_splice(model, 0, g_list_model_get_n_items(G_LIST_MODEL(model)), NULL);
+    if (!items) return;
+    g_autoptr(GPtrArray) names = g_ptr_array_new();
+    g_autoptr(GPtrArray) visible = g_ptr_array_new();
+    for (guint i = 0; i < items->len; i++) {
+        MediaItem *item = g_ptr_array_index(items, i);
+        if (category_id && g_strcmp0(category_id, item->category_id) != 0) continue;
+        g_ptr_array_add(names, item->name);
+        g_ptr_array_add(visible, item);
+    }
+    g_ptr_array_add(names, NULL);
+    gtk_string_list_splice(model, 0, 0, (const char * const *)names->pdata);
+    for (guint i = 0; i < visible->len; i++) {
+        g_autoptr(GObject) object = g_list_model_get_item(G_LIST_MODEL(model), i);
+        g_object_set_data(object, "media-item", g_ptr_array_index(visible, i));
+    }
+}
+
+static void movie_category_changed(GObject *object, GParamSpec *pspec, gpointer data) {
+    (void)object; (void)pspec;
+    App *app = data;
+    rebuild_media_model(app->movies, app->movie_categories,
+                        app->movie_category_picker, app->movie_model);
+}
+
+static void series_category_changed(GObject *object, GParamSpec *pspec, gpointer data) {
+    (void)object; (void)pspec;
+    App *app = data;
+    rebuild_media_model(app->series, app->series_categories,
+                        app->series_category_picker, app->series_model);
 }
 
 static char *profiles_path(void) {
@@ -460,6 +719,44 @@ static GtkWidget *make_menu_button(App *app) {
     return GTK_WIDGET(menu);
 }
 
+static void media_done(GObject *source, GAsyncResult *result, gpointer data) {
+    (void)source;
+    App *app = data;
+    GError *error = NULL;
+    MediaLoadResult *loaded = g_task_propagate_pointer(G_TASK(result), &error);
+    if (!loaded) {
+        flash_message(app, error->message);
+        g_error_free(error);
+        return;
+    }
+    if (app->movies) g_ptr_array_unref(app->movies);
+    if (app->movie_categories) g_ptr_array_unref(app->movie_categories);
+    if (app->series) g_ptr_array_unref(app->series);
+    if (app->series_categories) g_ptr_array_unref(app->series_categories);
+    app->movies = g_steal_pointer(&loaded->movies);
+    app->movie_categories = g_steal_pointer(&loaded->movie_categories);
+    app->series = g_steal_pointer(&loaded->series);
+    app->series_categories = g_steal_pointer(&loaded->series_categories);
+    media_load_result_free(loaded);
+    GtkStringList *movie_categories = gtk_string_list_new(NULL);
+    gtk_string_list_append(movie_categories, "All movies");
+    for (guint i = 0; i < app->movie_categories->len; i++)
+        gtk_string_list_append(movie_categories, ((Category *)g_ptr_array_index(app->movie_categories, i))->name);
+    gtk_drop_down_set_model(app->movie_category_picker, G_LIST_MODEL(movie_categories));
+    g_object_unref(movie_categories);
+    gtk_drop_down_set_selected(app->movie_category_picker, 0);
+    rebuild_media_model(app->movies, app->movie_categories, app->movie_category_picker, app->movie_model);
+    GtkStringList *series_categories = gtk_string_list_new(NULL);
+    gtk_string_list_append(series_categories, "All series");
+    for (guint i = 0; i < app->series_categories->len; i++)
+        gtk_string_list_append(series_categories, ((Category *)g_ptr_array_index(app->series_categories, i))->name);
+    gtk_drop_down_set_model(app->series_category_picker, G_LIST_MODEL(series_categories));
+    g_object_unref(series_categories);
+    gtk_drop_down_set_selected(app->series_category_picker, 0);
+    rebuild_media_model(app->series, app->series_categories, app->series_category_picker, app->series_model);
+    flash_message(app, "Movies and series are ready");
+}
+
 static void connect_done(GObject *source, GAsyncResult *result, gpointer data) {
     (void)source;
     App *app = data;
@@ -477,17 +774,27 @@ static void connect_done(GObject *source, GAsyncResult *result, gpointer data) {
     app->channels = g_steal_pointer(&loaded->channels);
     app->categories = g_steal_pointer(&loaded->categories);
     load_result_free(loaded);
+    save_profile(app);
+    load_favorites(app);
     GtkStringList *category_names = gtk_string_list_new(NULL);
     gtk_string_list_append(category_names, "All channels");
+    gtk_string_list_append(category_names, "★ Favorites");
     for (guint i = 0; i < app->categories->len; i++)
         gtk_string_list_append(category_names, ((Category *)g_ptr_array_index(app->categories, i))->name);
     gtk_drop_down_set_model(app->category_picker, G_LIST_MODEL(category_names));
     g_object_unref(category_names);
     gtk_drop_down_set_selected(app->category_picker, 0);
     rebuild_channel_model(app);
-    save_profile(app);
     adw_view_stack_set_visible_child_name(app->stack, "player");
     flash_message(app, app->channels->len ? "Connected — choose a channel" : "Connected, but no live channels were found");
+    LoginRequest *media_request = g_new0(LoginRequest, 1);
+    media_request->base_url = g_strdup(app->base_url);
+    media_request->user = g_strdup(app->user);
+    media_request->pass = g_strdup(app->pass);
+    GTask *media_task = g_task_new(NULL, NULL, media_done, app);
+    g_task_set_task_data(media_task, media_request, login_request_free);
+    g_task_run_in_thread(media_task, media_worker);
+    g_object_unref(media_task);
 }
 
 static void connect_clicked(GtkButton *button, gpointer data) {
@@ -517,10 +824,73 @@ static void connect_clicked(GtkButton *button, gpointer data) {
     gtk_spinner_start(app->spinner);
 }
 
-static void play_channel(App *app, Channel *channel) {
-    g_autofree char *user = g_uri_escape_string(app->user, NULL, TRUE);
-    g_autofree char *pass = g_uri_escape_string(app->pass, NULL, TRUE);
-    g_autofree char *url = g_strdup_printf("%s/live/%s/%s/%s.ts", app->base_url, user, pass, channel->stream_id);
+static char *progress_path(void) {
+    return g_build_filename(g_get_user_data_dir(), "xtream-player", "progress.ini", NULL);
+}
+
+static void save_progress(App *app) {
+    if (!app->pipeline || !app->on_demand || !app->progress_key) return;
+    gint64 position = 0, duration = 0;
+    if (!gst_element_query_position(app->pipeline, GST_FORMAT_TIME, &position) ||
+        !gst_element_query_duration(app->pipeline, GST_FORMAT_TIME, &duration)) return;
+    g_autoptr(GKeyFile) file = g_key_file_new();
+    g_autofree char *path = progress_path();
+    g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL);
+    gint64 seconds = position / GST_SECOND;
+    gint64 total = duration / GST_SECOND;
+    if (total > 0 && seconds > total * 95 / 100)
+        g_key_file_remove_key(file, "progress", app->progress_key, NULL);
+    else if (seconds >= 5)
+        g_key_file_set_int64(file, "progress", app->progress_key, seconds);
+    g_autofree char *directory = g_path_get_dirname(path);
+    g_mkdir_with_parents(directory, 0700);
+    g_key_file_save_to_file(file, path, NULL);
+}
+
+static gint64 load_progress(App *app) {
+    if (!app->progress_key) return 0;
+    g_autoptr(GKeyFile) file = g_key_file_new();
+    g_autofree char *path = progress_path();
+    if (!g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL)) return 0;
+    return g_key_file_get_int64(file, "progress", app->progress_key, NULL);
+}
+
+static gboolean update_playback_progress(gpointer data) {
+    App *app = data;
+    if (!app->pipeline || !app->on_demand) return G_SOURCE_CONTINUE;
+    gint64 position = 0, duration = 0;
+    if (gst_element_query_position(app->pipeline, GST_FORMAT_TIME, &position) &&
+        gst_element_query_duration(app->pipeline, GST_FORMAT_TIME, &duration) && duration > 0) {
+        app->updating_progress = TRUE;
+        gtk_range_set_range(GTK_RANGE(app->progress_scale), 0, (double)(duration / GST_SECOND));
+        gtk_range_set_value(GTK_RANGE(app->progress_scale), (double)(position / GST_SECOND));
+        app->updating_progress = FALSE;
+        save_progress(app);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean resume_playback(gpointer data) {
+    App *app = data;
+    gint64 seconds = load_progress(app);
+    if (seconds > 0 && app->pipeline)
+        gst_element_seek_simple(app->pipeline, GST_FORMAT_TIME,
+            GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT, seconds * GST_SECOND);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean progress_changed(GtkRange *range, GtkScrollType scroll, double value, gpointer data) {
+    (void)range; (void)scroll;
+    App *app = data;
+    if (!app->updating_progress && app->pipeline && app->on_demand)
+        gst_element_seek_simple(app->pipeline, GST_FORMAT_TIME,
+            GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT, (gint64)value * GST_SECOND);
+    return FALSE;
+}
+
+static void play_uri(App *app, const char *url, const char *title,
+                     gboolean on_demand, const char *progress_identity) {
+    save_progress(app);
     if (!app->pipeline) {
         app->pipeline = gst_element_factory_make("playbin", "player");
         GstElement *sink = gst_element_factory_make("gtk4paintablesink", "video-sink");
@@ -541,9 +911,33 @@ static void play_channel(App *app, Channel *channel) {
     gst_element_get_state(app->pipeline, NULL, NULL, GST_SECOND);
     g_object_set(app->pipeline, "uri", url, NULL);
     gst_element_set_state(app->pipeline, GST_STATE_PLAYING);
+    app->on_demand = on_demand;
+    gtk_widget_set_visible(GTK_WIDGET(app->progress_scale), on_demand);
+    g_free(app->progress_key);
+    app->progress_key = progress_identity ? g_compute_checksum_for_string(
+        G_CHECKSUM_SHA256, progress_identity, -1) : NULL;
+    if (on_demand) g_timeout_add(700, resume_playback, app);
     app->playing = TRUE;
-    gtk_label_set_text(app->now_playing, channel->name);
+    gtk_label_set_text(app->now_playing, title);
     gtk_button_set_icon_name(app->play_button, "media-playback-pause-symbolic");
+}
+
+static void play_channel(App *app, Channel *channel) {
+    g_autofree char *user = g_uri_escape_string(app->user, NULL, TRUE);
+    g_autofree char *pass = g_uri_escape_string(app->pass, NULL, TRUE);
+    g_autofree char *url = g_strdup_printf("%s/live/%s/%s/%s.ts", app->base_url, user, pass, channel->stream_id);
+    play_uri(app, url, channel->name, FALSE, NULL);
+}
+
+static void play_media(App *app, MediaItem *item) {
+    g_autofree char *user = g_uri_escape_string(app->user, NULL, TRUE);
+    g_autofree char *pass = g_uri_escape_string(app->pass, NULL, TRUE);
+    g_autofree char *url = g_strdup_printf("%s/%s/%s/%s/%s.%s", app->base_url,
+        item->series ? "series" : "movie", user, pass, item->stream_id,
+        item->extension && item->extension[0] ? item->extension : "mp4");
+    g_autofree char *identity = g_strdup_printf("%s|%s|%s|%s", app->profile_id ? app->profile_id : "default",
+        item->series ? "episode" : "movie", item->stream_id, item->name);
+    play_uri(app, url, item->name, TRUE, identity);
 }
 
 static void channel_activated(GtkListView *view, guint position, gpointer data) {
@@ -551,6 +945,123 @@ static void channel_activated(GtkListView *view, guint position, gpointer data) 
     g_autoptr(GObject) item = g_list_model_get_item(model, position);
     Channel *channel = g_object_get_data(item, "channel");
     if (channel) play_channel(data, channel);
+}
+
+static void movie_activated(GtkListView *view, guint position, gpointer data) {
+    GListModel *model = G_LIST_MODEL(gtk_list_view_get_model(view));
+    g_autoptr(GObject) object = g_list_model_get_item(model, position);
+    MediaItem *item = g_object_get_data(object, "media-item");
+    if (item) play_media(data, item);
+}
+
+static void append_episode_array(GPtrArray *episodes, JsonArray *array) {
+    for (guint i = 0; i < json_array_get_length(array); i++) {
+        JsonObject *object = json_array_get_object_element(array, i);
+        if (!object) continue;
+        MediaItem *episode = g_new0(MediaItem, 1);
+        episode->series = TRUE;
+        episode->stream_id = json_value_string(object, "id");
+        episode->extension = json_string_or(object, "container_extension", "mp4");
+        g_autofree char *number = json_value_string(object, "episode_num");
+        g_autofree char *title = json_string_or(object, "title", "Episode");
+        episode->name = number[0] ? g_strdup_printf("Episode %s — %s", number, title) : g_strdup(title);
+        if (episode->stream_id[0]) g_ptr_array_add(episodes, episode); else media_item_free(episode);
+    }
+}
+
+static void series_worker(GTask *task, gpointer source, gpointer task_data, GCancellable *cancel) {
+    (void)source; (void)cancel;
+    SeriesRequest *request = task_data;
+    g_autofree char *action = g_strdup_printf("get_series_info&series_id=%s", request->series_id);
+    GError *error = NULL;
+    g_autoptr(JsonParser) parser = fetch_api(&request->login, action, &error);
+    if (!parser) { g_task_return_error(task, error); return; }
+    JsonNode *root = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_OBJECT(root)) {
+        g_task_return_new_error(task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                "The provider returned invalid series information.");
+        return;
+    }
+    JsonObject *object = json_node_get_object(root);
+    JsonNode *episodes_node = json_object_get_member(object, "episodes");
+    GPtrArray *episodes = g_ptr_array_new_with_free_func(media_item_free);
+    if (episodes_node && JSON_NODE_HOLDS_OBJECT(episodes_node)) {
+        JsonObject *seasons = json_node_get_object(episodes_node);
+        g_autoptr(GList) members = json_object_get_members(seasons);
+        for (GList *it = members; it; it = it->next) {
+            JsonNode *season = json_object_get_member(seasons, it->data);
+            if (JSON_NODE_HOLDS_ARRAY(season)) append_episode_array(episodes, json_node_get_array(season));
+        }
+    } else if (episodes_node && JSON_NODE_HOLDS_ARRAY(episodes_node)) {
+        JsonArray *outer = json_node_get_array(episodes_node);
+        for (guint i = 0; i < json_array_get_length(outer); i++) {
+            JsonNode *node = json_array_get_element(outer, i);
+            if (JSON_NODE_HOLDS_ARRAY(node)) append_episode_array(episodes, json_node_get_array(node));
+            else if (JSON_NODE_HOLDS_OBJECT(node)) {
+                JsonArray *single = json_array_new();
+                json_array_add_element(single, json_node_copy(node));
+                append_episode_array(episodes, single);
+                json_array_unref(single);
+            }
+        }
+    }
+    g_task_return_pointer(task, episodes, (GDestroyNotify)g_ptr_array_unref);
+}
+
+static void episode_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
+    (void)box;
+    MediaItem *episode = g_object_get_data(G_OBJECT(row), "episode");
+    if (episode) play_media(data, episode);
+}
+
+static void series_done(GObject *source, GAsyncResult *result, gpointer data) {
+    (void)source;
+    App *app = data;
+    GError *error = NULL;
+    GPtrArray *episodes = g_task_propagate_pointer(G_TASK(result), &error);
+    if (!episodes) { flash_message(app, error->message); g_error_free(error); return; }
+    GtkWindow *window = GTK_WINDOW(gtk_window_new());
+    gtk_window_set_title(window, "Episodes");
+    gtk_window_set_default_size(window, 520, 640);
+    gtk_window_set_transient_for(window, GTK_WINDOW(app->window));
+    gtk_window_set_modal(window, TRUE);
+    GtkScrolledWindow *scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
+    GtkListBox *list = GTK_LIST_BOX(gtk_list_box_new());
+    gtk_widget_add_css_class(GTK_WIDGET(list), "boxed-list");
+    gtk_list_box_set_selection_mode(list, GTK_SELECTION_NONE);
+    for (guint i = 0; i < episodes->len; i++) {
+        MediaItem *episode = g_ptr_array_index(episodes, i);
+        AdwActionRow *row = ADW_ACTION_ROW(adw_action_row_new());
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), episode->name);
+        adw_action_row_add_suffix(row, gtk_image_new_from_icon_name("media-playback-start-symbolic"));
+        gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
+        g_object_set_data(G_OBJECT(row), "episode", episode);
+        gtk_list_box_append(list, GTK_WIDGET(row));
+    }
+    g_signal_connect(list, "row-activated", G_CALLBACK(episode_row_activated), app);
+    gtk_scrolled_window_set_child(scroll, GTK_WIDGET(list));
+    gtk_window_set_child(window, GTK_WIDGET(scroll));
+    g_object_set_data_full(G_OBJECT(window), "episodes", episodes, (GDestroyNotify)g_ptr_array_unref);
+    gtk_window_present(window);
+}
+
+static void series_activated(GtkListView *view, guint position, gpointer data) {
+    App *app = data;
+    GListModel *model = G_LIST_MODEL(gtk_list_view_get_model(view));
+    g_autoptr(GObject) object = g_list_model_get_item(model, position);
+    MediaItem *item = g_object_get_data(object, "media-item");
+    if (!item) return;
+    SeriesRequest *request = g_new0(SeriesRequest, 1);
+    request->login.base_url = g_strdup(app->base_url);
+    request->login.user = g_strdup(app->user);
+    request->login.pass = g_strdup(app->pass);
+    request->series_id = g_strdup(item->stream_id);
+    request->series_name = g_strdup(item->name);
+    GTask *task = g_task_new(NULL, NULL, series_done, app);
+    g_task_set_task_data(task, request, series_request_free);
+    g_task_run_in_thread(task, series_worker);
+    g_object_unref(task);
+    flash_message(app, "Loading episodes…");
 }
 
 static void search_changed(GtkSearchEntry *entry, gpointer data) {
@@ -576,25 +1087,30 @@ static void mute_clicked(GtkButton *button, gpointer data) {
 
 static gboolean hide_player_controls(gpointer data) {
     App *app = data;
+    if (!app->fullscreen) { app->controls_timeout = 0; return G_SOURCE_REMOVE; }
+    if (g_get_monotonic_time() - app->controls_last_motion < 2800000)
+        return G_SOURCE_CONTINUE;
+    gtk_revealer_set_reveal_child(app->player_controls, FALSE);
+    gtk_widget_set_cursor_from_name(app->video_surface, "none");
     app->controls_timeout = 0;
-    if (app->fullscreen) {
-        gtk_revealer_set_reveal_child(app->player_controls, FALSE);
-        gtk_widget_set_cursor_from_name(app->video_surface, "none");
-    }
     return G_SOURCE_REMOVE;
 }
 
 static void reveal_player_controls(App *app) {
     gtk_revealer_set_reveal_child(app->player_controls, TRUE);
     gtk_widget_set_cursor_from_name(app->video_surface, NULL);
-    if (app->controls_timeout) g_source_remove(app->controls_timeout);
-    app->controls_timeout = app->fullscreen
-        ? g_timeout_add(2800, hide_player_controls, app) : 0;
+    app->controls_last_motion = g_get_monotonic_time();
+    if (app->fullscreen && !app->controls_timeout)
+        app->controls_timeout = g_timeout_add(250, hide_player_controls, app);
 }
 
 static void pointer_moved(GtkEventControllerMotion *controller, double x, double y, gpointer data) {
-    (void)controller; (void)x; (void)y;
-    reveal_player_controls(data);
+    (void)controller;
+    App *app = data;
+    if (app->pointer_known && fabs(x - app->pointer_x) < 1.0 && fabs(y - app->pointer_y) < 1.0)
+        return;
+    app->pointer_x = x; app->pointer_y = y; app->pointer_known = TRUE;
+    reveal_player_controls(app);
 }
 
 static void toggle_fullscreen(App *app) {
@@ -640,6 +1156,7 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval,
 static void show_login(GtkButton *button, gpointer data) {
     (void)button;
     App *app = data;
+    save_progress(app);
     if (app->pipeline) gst_element_set_state(app->pipeline, GST_STATE_NULL);
     adw_view_stack_set_visible_child_name(app->stack, "login");
 }
@@ -707,11 +1224,62 @@ static GtkWidget *build_login(App *app) {
     return GTK_WIDGET(toolbar);
 }
 
+static GtkWidget *build_media_sidebar(App *app, gboolean series) {
+    GtkBox *sidebar = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 8));
+    gtk_widget_set_size_request(GTK_WIDGET(sidebar), 300, -1);
+    gtk_widget_set_margin_top(GTK_WIDGET(sidebar), 12);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(sidebar), 12);
+    gtk_widget_set_margin_start(GTK_WIDGET(sidebar), 12);
+    gtk_widget_set_margin_end(GTK_WIDGET(sidebar), 12);
+    GtkSearchEntry *search = GTK_SEARCH_ENTRY(gtk_search_entry_new());
+    gtk_search_entry_set_placeholder_text(search, series ? "Search series" : "Search movies");
+    GtkDropDown *picker = GTK_DROP_DOWN(gtk_drop_down_new(NULL, NULL));
+    GtkScrolledWindow *scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
+    gtk_scrolled_window_set_policy(scroll, GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    GtkStringList *model = gtk_string_list_new(NULL);
+    GtkExpression *expression = gtk_property_expression_new(GTK_TYPE_STRING_OBJECT, NULL, "string");
+    GtkStringFilter *filter = gtk_string_filter_new(expression);
+    gtk_string_filter_set_ignore_case(filter, TRUE);
+    GtkFilterListModel *filtered = gtk_filter_list_model_new(
+        G_LIST_MODEL(g_object_ref(model)), GTK_FILTER(g_object_ref(filter)));
+    gtk_filter_list_model_set_incremental(filtered, TRUE);
+    GtkSingleSelection *selection = gtk_single_selection_new(G_LIST_MODEL(filtered));
+    gtk_single_selection_set_autoselect(selection, FALSE);
+    GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
+    g_signal_connect(factory, "setup", G_CALLBACK(channel_item_setup), app);
+    g_signal_connect(factory, "bind", G_CALLBACK(channel_item_bind), app);
+    GtkListView *list = GTK_LIST_VIEW(gtk_list_view_new(GTK_SELECTION_MODEL(selection), factory));
+    gtk_list_view_set_single_click_activate(list, TRUE);
+    gtk_widget_add_css_class(GTK_WIDGET(list), "boxed-list");
+    g_signal_connect(search, "search-changed", G_CALLBACK(search_changed), filter);
+    gtk_scrolled_window_set_child(scroll, GTK_WIDGET(list));
+    gtk_box_append(sidebar, GTK_WIDGET(search));
+    gtk_box_append(sidebar, GTK_WIDGET(picker));
+    gtk_box_append(sidebar, GTK_WIDGET(scroll));
+    gtk_widget_set_vexpand(GTK_WIDGET(scroll), TRUE);
+    if (series) {
+        app->series_model = model; app->series_filter = filter;
+        app->series_category_picker = picker; app->series_list = list;
+        g_signal_connect(picker, "notify::selected", G_CALLBACK(series_category_changed), app);
+        g_signal_connect(list, "activate", G_CALLBACK(series_activated), app);
+    } else {
+        app->movie_model = model; app->movie_filter = filter;
+        app->movie_category_picker = picker; app->movie_list = list;
+        g_signal_connect(picker, "notify::selected", G_CALLBACK(movie_category_changed), app);
+        g_signal_connect(list, "activate", G_CALLBACK(movie_activated), app);
+    }
+    return GTK_WIDGET(sidebar);
+}
+
 static GtkWidget *build_player(App *app) {
     AdwToolbarView *toolbar = ADW_TOOLBAR_VIEW(adw_toolbar_view_new());
     app->player_toolbar = toolbar;
     AdwHeaderBar *header = ADW_HEADER_BAR(adw_header_bar_new());
-    adw_header_bar_set_title_widget(header, adw_window_title_new("Live TV", "Xtream Player"));
+    app->catalog_stack = ADW_VIEW_STACK(adw_view_stack_new());
+    AdwViewSwitcher *switcher = ADW_VIEW_SWITCHER(adw_view_switcher_new());
+    adw_view_switcher_set_stack(switcher, app->catalog_stack);
+    adw_view_switcher_set_policy(switcher, ADW_VIEW_SWITCHER_POLICY_WIDE);
+    adw_header_bar_set_title_widget(header, GTK_WIDGET(switcher));
     GtkButton *account = GTK_BUTTON(gtk_button_new_from_icon_name("system-log-out-symbolic"));
     GtkButton *fullscreen = GTK_BUTTON(gtk_button_new_from_icon_name("view-fullscreen-symbolic"));
     gtk_widget_set_tooltip_text(GTK_WIDGET(fullscreen), "Fullscreen (F11)");
@@ -750,8 +1318,8 @@ static GtkWidget *build_player(App *app) {
     gtk_single_selection_set_autoselect(selection, FALSE);
     gtk_single_selection_set_can_unselect(selection, TRUE);
     GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
-    g_signal_connect(factory, "setup", G_CALLBACK(channel_item_setup), NULL);
-    g_signal_connect(factory, "bind", G_CALLBACK(channel_item_bind), NULL);
+    g_signal_connect(factory, "setup", G_CALLBACK(channel_item_setup), app);
+    g_signal_connect(factory, "bind", G_CALLBACK(channel_item_bind), app);
     app->channel_list = GTK_LIST_VIEW(gtk_list_view_new(GTK_SELECTION_MODEL(selection), factory));
     gtk_list_view_set_single_click_activate(app->channel_list, TRUE);
     gtk_widget_add_css_class(GTK_WIDGET(app->channel_list), "boxed-list");
@@ -762,7 +1330,15 @@ static GtkWidget *build_player(App *app) {
     gtk_box_append(sidebar, GTK_WIDGET(app->category_picker));
     gtk_box_append(sidebar, GTK_WIDGET(scroll));
     gtk_widget_set_vexpand(GTK_WIDGET(scroll), TRUE);
-    gtk_paned_set_start_child(paned, GTK_WIDGET(sidebar));
+    adw_view_stack_add_titled_with_icon(app->catalog_stack, GTK_WIDGET(sidebar), "live",
+                                        "Live TV", "video-display-symbolic");
+    adw_view_stack_add_titled_with_icon(app->catalog_stack, build_media_sidebar(app, FALSE), "movies",
+                                        "Movies", "video-x-generic-symbolic");
+    adw_view_stack_add_titled_with_icon(app->catalog_stack, build_media_sidebar(app, TRUE), "series",
+                                        "Series", "folder-videos-symbolic");
+    adw_view_stack_set_visible_child_name(app->catalog_stack, "live");
+    app->sidebar = GTK_WIDGET(app->catalog_stack);
+    gtk_paned_set_start_child(paned, GTK_WIDGET(app->catalog_stack));
     GtkOverlay *content = GTK_OVERLAY(gtk_overlay_new());
     app->video_surface = GTK_WIDGET(content);
     gtk_widget_add_css_class(GTK_WIDGET(content), "player-surface");
@@ -793,6 +1369,12 @@ static GtkWidget *build_player(App *app) {
     g_signal_connect(app->fullscreen_button, "clicked", G_CALLBACK(fullscreen_clicked), app);
     gtk_box_append(controls, GTK_WIDGET(app->play_button));
     gtk_box_append(controls, GTK_WIDGET(app->now_playing));
+    app->progress_scale = GTK_SCALE(gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0, 1, 1));
+    gtk_widget_set_hexpand(GTK_WIDGET(app->progress_scale), TRUE);
+    gtk_widget_set_visible(GTK_WIDGET(app->progress_scale), FALSE);
+    gtk_scale_set_draw_value(app->progress_scale, FALSE);
+    g_signal_connect(app->progress_scale, "change-value", G_CALLBACK(progress_changed), app);
+    gtk_box_append(controls, GTK_WIDGET(app->progress_scale));
     gtk_box_append(controls, GTK_WIDGET(app->mute_button));
     gtk_box_append(controls, GTK_WIDGET(app->fullscreen_button));
     app->player_controls = GTK_REVEALER(gtk_revealer_new());
@@ -813,17 +1395,27 @@ static GtkWidget *build_player(App *app) {
 
 static void app_free(gpointer data) {
     App *app = data;
+    save_progress(app);
     if (app->pipeline) {
         gst_element_set_state(app->pipeline, GST_STATE_NULL);
         gst_object_unref(app->pipeline);
     }
     if (app->controls_timeout) g_source_remove(app->controls_timeout);
+    if (app->progress_timer) g_source_remove(app->progress_timer);
     g_clear_object(&app->interface_settings);
     if (app->channels) g_ptr_array_unref(app->channels);
     if (app->categories) g_ptr_array_unref(app->categories);
+    if (app->movies) g_ptr_array_unref(app->movies);
+    if (app->movie_categories) g_ptr_array_unref(app->movie_categories);
+    if (app->series) g_ptr_array_unref(app->series);
+    if (app->series_categories) g_ptr_array_unref(app->series_categories);
     if (app->profiles) g_ptr_array_unref(app->profiles);
+    if (app->favorites) g_hash_table_unref(app->favorites);
     g_clear_object(&app->channel_model);
     g_clear_object(&app->channel_filter);
+    g_clear_object(&app->movie_model); g_clear_object(&app->movie_filter);
+    g_clear_object(&app->series_model); g_clear_object(&app->series_filter);
+    g_free(app->progress_key);
     g_free(app->profile_id); g_free(app->base_url); g_free(app->user); g_free(app->pass); g_free(app);
 }
 
@@ -860,6 +1452,7 @@ static void activate(GApplication *application, gpointer user_data) {
     app->stack = ADW_VIEW_STACK(adw_view_stack_new());
     adw_view_stack_add_named(app->stack, build_login(app), "login");
     adw_view_stack_add_named(app->stack, build_player(app), "player");
+    app->progress_timer = g_timeout_add_seconds(5, update_playback_progress, app);
     GtkOverlay *overlay = GTK_OVERLAY(gtk_overlay_new());
     gtk_overlay_set_child(overlay, GTK_WIDGET(app->stack));
     app->toast_revealer = GTK_REVEALER(gtk_revealer_new());
