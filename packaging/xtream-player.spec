@@ -1,6 +1,6 @@
 Name:           xtream-player
 Version:        0.2.0
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        Native GTK 4 player for Xtream Codes IPTV providers
 
 License:        MIT
@@ -48,6 +48,9 @@ appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/io.github
 %{_datadir}/metainfo/io.github.mackilanu.XtreamPlayer.metainfo.xml
 
 %changelog
+* Fri Aug 14 2026 Marcus Andersson <18679427+mackilanu@users.noreply.github.com> - 0.2.0-4
+- Add background channel and category resync that bypasses the cache
+
 * Fri Aug 14 2026 Marcus Andersson <18679427+mackilanu@users.noreply.github.com> - 0.2.0-3
 - Prevent overlapping live streams during channel changes
 - Report playback errors and retry transient live-stream failures once

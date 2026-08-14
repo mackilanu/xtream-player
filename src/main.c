@@ -38,6 +38,7 @@ typedef struct {
     AdwEntryRow *username;
     AdwPasswordEntryRow *password;
     GtkButton *connect_button;
+    GtkButton *refresh_button;
     GtkSpinner *spinner;
     AdwStatusPage *empty_page;
     GtkSearchEntry *search;
@@ -98,6 +99,7 @@ typedef struct {
     char *base_url;
     char *user;
     char *pass;
+    gboolean force_refresh;
 } LoginRequest;
 
 typedef struct { LoginRequest login; char *series_id; char *series_name; } SeriesRequest;
@@ -196,7 +198,7 @@ static JsonParser *fetch_api(LoginRequest *request, const char *action, GError *
     gboolean have_cache = g_file_get_contents(cache_path, &cached_data, &cached_length, NULL);
     gboolean cache_fresh = have_cache && g_stat(cache_path, &cache_stat) == 0 &&
         time(NULL) - cache_stat.st_mtime < 6 * 60 * 60;
-    if (cache_fresh) {
+    if (cache_fresh && !request->force_refresh) {
         JsonParser *cached = json_parser_new();
         if (json_parser_load_from_data(cached, cached_data, (gssize)cached_length, NULL)) {
             return cached;
@@ -219,7 +221,7 @@ static JsonParser *fetch_api(LoginRequest *request, const char *action, GError *
     soup_message_headers_append(soup_message_get_request_headers(message), "User-Agent", "XtreamPlayer/0.1");
     g_autoptr(GBytes) bytes = soup_session_send_and_read(session, message, NULL, error);
     if (!bytes) {
-        if (have_cache) {
+        if (have_cache && !request->force_refresh) {
             g_clear_error(error);
             JsonParser *cached = json_parser_new();
             if (json_parser_load_from_data(cached, cached_data, (gssize)cached_length, error)) {
@@ -776,6 +778,8 @@ static void connect_done(GObject *source, GAsyncResult *result, gpointer data) {
         g_error_free(error);
         return;
     }
+    gtk_string_list_splice(app->channel_model, 0,
+                           g_list_model_get_n_items(G_LIST_MODEL(app->channel_model)), NULL);
     if (app->channels) g_ptr_array_unref(app->channels);
     if (app->categories) g_ptr_array_unref(app->categories);
     app->channels = g_steal_pointer(&loaded->channels);
@@ -802,6 +806,62 @@ static void connect_done(GObject *source, GAsyncResult *result, gpointer data) {
     g_task_set_task_data(media_task, media_request, login_request_free);
     g_task_run_in_thread(media_task, media_worker);
     g_object_unref(media_task);
+}
+
+static void refresh_done(GObject *source, GAsyncResult *result, gpointer data) {
+    (void)source;
+    App *app = data;
+    GError *error = NULL;
+    LoadResult *loaded = g_task_propagate_pointer(G_TASK(result), &error);
+    gtk_widget_set_sensitive(GTK_WIDGET(app->refresh_button), TRUE);
+    if (!loaded) {
+        g_autofree char *message = g_strdup_printf("Could not update channels: %s", error->message);
+        flash_message(app, message);
+        g_error_free(error);
+        return;
+    }
+
+    gtk_string_list_splice(app->channel_model, 0,
+                           g_list_model_get_n_items(G_LIST_MODEL(app->channel_model)), NULL);
+    if (app->channels) g_ptr_array_unref(app->channels);
+    if (app->categories) g_ptr_array_unref(app->categories);
+    app->channels = g_steal_pointer(&loaded->channels);
+    app->categories = g_steal_pointer(&loaded->categories);
+    load_result_free(loaded);
+
+    GtkStringList *category_names = gtk_string_list_new(NULL);
+    gtk_string_list_append(category_names, "All channels");
+    gtk_string_list_append(category_names, "★ Favorites");
+    for (guint i = 0; i < app->categories->len; i++)
+        gtk_string_list_append(category_names,
+            ((Category *)g_ptr_array_index(app->categories, i))->name);
+    gtk_drop_down_set_model(app->category_picker, G_LIST_MODEL(category_names));
+    g_object_unref(category_names);
+    gtk_drop_down_set_selected(app->category_picker, 0);
+    rebuild_channel_model(app);
+
+    g_autofree char *message = g_strdup_printf("Channel list updated — %u channels",
+                                                app->channels->len);
+    flash_message(app, message);
+}
+
+static void refresh_channels_clicked(GtkButton *button, gpointer data) {
+    App *app = data;
+    if (!app->base_url || !app->user || !app->pass) {
+        flash_message(app, "Connect to a playlist first.");
+        return;
+    }
+    LoginRequest *request = g_new0(LoginRequest, 1);
+    request->base_url = g_strdup(app->base_url);
+    request->user = g_strdup(app->user);
+    request->pass = g_strdup(app->pass);
+    request->force_refresh = TRUE;
+    GTask *task = g_task_new(NULL, NULL, refresh_done, app);
+    g_task_set_task_data(task, request, login_request_free);
+    g_task_run_in_thread(task, connect_worker);
+    g_object_unref(task);
+    gtk_widget_set_sensitive(GTK_WIDGET(button), FALSE);
+    flash_message(app, "Updating channels…");
 }
 
 static void connect_clicked(GtkButton *button, gpointer data) {
@@ -1446,12 +1506,16 @@ static GtkWidget *build_player(App *app) {
     adw_header_bar_set_title_widget(header, GTK_WIDGET(switcher));
     GtkButton *account = GTK_BUTTON(gtk_button_new_from_icon_name("system-log-out-symbolic"));
     GtkButton *fullscreen = GTK_BUTTON(gtk_button_new_from_icon_name("view-fullscreen-symbolic"));
+    app->refresh_button = GTK_BUTTON(gtk_button_new_from_icon_name("view-refresh-symbolic"));
+    gtk_widget_set_tooltip_text(GTK_WIDGET(app->refresh_button), "Update channels from provider");
+    g_signal_connect(app->refresh_button, "clicked", G_CALLBACK(refresh_channels_clicked), app);
     gtk_widget_set_tooltip_text(GTK_WIDGET(fullscreen), "Fullscreen (F11)");
     g_signal_connect(fullscreen, "clicked", G_CALLBACK(fullscreen_clicked), app);
     gtk_widget_set_tooltip_text(GTK_WIDGET(account), "Change provider");
     g_signal_connect(account, "clicked", G_CALLBACK(show_login), app);
     adw_header_bar_pack_end(header, GTK_WIDGET(account));
     adw_header_bar_pack_end(header, GTK_WIDGET(fullscreen));
+    adw_header_bar_pack_end(header, GTK_WIDGET(app->refresh_button));
     adw_header_bar_pack_end(header, make_menu_button(app));
     adw_toolbar_view_add_top_bar(toolbar, GTK_WIDGET(header));
     GtkPaned *paned = GTK_PANED(gtk_paned_new(GTK_ORIENTATION_HORIZONTAL));

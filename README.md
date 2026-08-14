@@ -21,6 +21,7 @@ Only use playlists and streams you are authorized to access.
 - Provider categories and channel search
 - Per-playlist Live TV favorites with a dedicated favorites filter
 - Six-hour cache with offline fallback
+- One-click channel resync that bypasses the cache
 - Non-blocking network requests and virtualized channel lists
 - System, light, and dark appearance modes
 - Fullscreen video with auto-hiding controls
