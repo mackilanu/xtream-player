@@ -51,6 +51,7 @@ appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/io.github
 * Fri Aug 14 2026 Marcus Andersson <18679427+mackilanu@users.noreply.github.com> - 0.2.0-1
 - Add provider movies, series, episodes, seeking, and playback resume
 - Add persistent per-playlist Live TV favorites and reliable fullscreen control hiding
+- Add audio-track and embedded-subtitle selectors
 
 * Thu Aug 13 2026 Marcus Andersson <18679427+mackilanu@users.noreply.github.com> - 0.1.1-1
 - Toggle fullscreen by double-clicking the video

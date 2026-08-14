@@ -15,6 +15,7 @@ Only use playlists and streams you are authorized to access.
 - Xtream Codes-compatible live TV
 - Provider movie and series catalogs with category filtering and search
 - On-demand playback, episode selection, seeking, and automatic resume
+- Runtime audio-track and embedded-subtitle selection
 - Multiple named provider profiles
 - Password storage in GNOME Keyring
 - Provider categories and channel search

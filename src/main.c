@@ -54,6 +54,8 @@ typedef struct {
     GtkLabel *now_playing;
     GtkButton *play_button;
     GtkButton *mute_button;
+    GtkMenuButton *audio_menu;
+    GtkMenuButton *subtitle_menu;
     GtkButton *fullscreen_button;
     GtkScale *progress_scale;
     GtkRevealer *player_controls;
@@ -1085,6 +1087,94 @@ static void mute_clicked(GtkButton *button, gpointer data) {
     gtk_button_set_icon_name(button, app->muted ? "audio-volume-muted-symbolic" : "audio-volume-high-symbolic");
 }
 
+static char *track_label(App *app, gboolean audio, int index) {
+    GstTagList *tags = NULL;
+    g_signal_emit_by_name(app->pipeline, audio ? "get-audio-tags" : "get-text-tags",
+                          index, &tags);
+    char *language = NULL, *title = NULL, *codec = NULL;
+    if (tags) {
+        gst_tag_list_get_string(tags, GST_TAG_LANGUAGE_CODE, &language);
+        gst_tag_list_get_string(tags, GST_TAG_TITLE, &title);
+        gst_tag_list_get_string(tags, GST_TAG_CODEC, &codec);
+        gst_tag_list_unref(tags);
+    }
+    char *label = NULL;
+    if (title && title[0]) label = g_strdup(title);
+    else if (language && language[0]) label = g_strdup_printf("%s — %s %d", language,
+                                                              audio ? "Audio" : "Subtitle", index + 1);
+    else if (codec && codec[0]) label = g_strdup_printf("%s — %s", audio ? "Audio" : "Subtitle", codec);
+    else label = g_strdup_printf("%s %d", audio ? "Audio" : "Subtitle", index + 1);
+    g_free(language); g_free(title); g_free(codec);
+    return label;
+}
+
+static void track_selected(GtkButton *button, gpointer data) {
+    App *app = data;
+    gboolean audio = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "audio"));
+    int index = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "track-index"));
+    if (app->pipeline)
+        g_object_set(app->pipeline, audio ? "current-audio" : "current-text", index, NULL);
+    GtkWidget *popover = gtk_widget_get_ancestor(GTK_WIDGET(button), GTK_TYPE_POPOVER);
+    if (popover) gtk_popover_popdown(GTK_POPOVER(popover));
+}
+
+static void append_track_button(GtkBox *box, App *app, gboolean audio,
+                                int index, int current, const char *label) {
+    g_autofree char *display = g_strdup_printf("%s%s", index == current ? "✓  " : "", label);
+    GtkButton *button = GTK_BUTTON(gtk_button_new_with_label(display));
+    gtk_widget_add_css_class(GTK_WIDGET(button), "flat");
+    gtk_widget_set_halign(GTK_WIDGET(button), GTK_ALIGN_FILL);
+    g_object_set_data(G_OBJECT(button), "audio", GINT_TO_POINTER(audio));
+    g_object_set_data(G_OBJECT(button), "track-index", GINT_TO_POINTER(index));
+    g_signal_connect(button, "clicked", G_CALLBACK(track_selected), app);
+    gtk_box_append(box, GTK_WIDGET(button));
+}
+
+static void refresh_track_menu(GtkPopover *popover, gpointer data) {
+    App *app = data;
+    GtkBox *box = GTK_BOX(gtk_popover_get_child(popover));
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(box)))) gtk_box_remove(box, child);
+    gboolean audio = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(popover), "audio"));
+    if (!app->pipeline) {
+        GtkWidget *empty = gtk_label_new("Nothing is playing");
+        gtk_widget_set_margin_top(empty, 12); gtk_widget_set_margin_bottom(empty, 12);
+        gtk_widget_set_margin_start(empty, 12); gtk_widget_set_margin_end(empty, 12);
+        gtk_box_append(box, empty);
+        return;
+    }
+    int count = 0, current = -1;
+    g_object_get(app->pipeline, audio ? "n-audio" : "n-text", &count,
+                 audio ? "current-audio" : "current-text", &current, NULL);
+    if (!audio) append_track_button(box, app, FALSE, -1, current, "Subtitles Off");
+    for (int i = 0; i < count; i++) {
+        g_autofree char *label = track_label(app, audio, i);
+        append_track_button(box, app, audio, i, current, label);
+    }
+    if (audio && count == 0) {
+        GtkWidget *empty = gtk_label_new("No alternate audio tracks");
+        gtk_widget_set_margin_top(empty, 12); gtk_widget_set_margin_bottom(empty, 12);
+        gtk_widget_set_margin_start(empty, 12); gtk_widget_set_margin_end(empty, 12);
+        gtk_box_append(box, empty);
+    }
+}
+
+static GtkWidget *make_track_menu(App *app, gboolean audio) {
+    GtkMenuButton *menu = GTK_MENU_BUTTON(gtk_menu_button_new());
+    gtk_menu_button_set_icon_name(menu, audio ? "audio-headphones-symbolic" : "media-view-subtitles-symbolic");
+    gtk_widget_set_tooltip_text(GTK_WIDGET(menu), audio ? "Audio track" : "Subtitles");
+    GtkPopover *popover = GTK_POPOVER(gtk_popover_new());
+    GtkBox *box = GTK_BOX(gtk_box_new(GTK_ORIENTATION_VERTICAL, 4));
+    gtk_widget_set_margin_top(GTK_WIDGET(box), 6); gtk_widget_set_margin_bottom(GTK_WIDGET(box), 6);
+    gtk_widget_set_margin_start(GTK_WIDGET(box), 6); gtk_widget_set_margin_end(GTK_WIDGET(box), 6);
+    gtk_popover_set_child(popover, GTK_WIDGET(box));
+    g_object_set_data(G_OBJECT(popover), "audio", GINT_TO_POINTER(audio));
+    g_signal_connect(popover, "show", G_CALLBACK(refresh_track_menu), app);
+    gtk_menu_button_set_popover(menu, GTK_WIDGET(popover));
+    if (audio) app->audio_menu = menu; else app->subtitle_menu = menu;
+    return GTK_WIDGET(menu);
+}
+
 static gboolean hide_player_controls(gpointer data) {
     App *app = data;
     if (!app->fullscreen) { app->controls_timeout = 0; return G_SOURCE_REMOVE; }
@@ -1375,6 +1465,8 @@ static GtkWidget *build_player(App *app) {
     gtk_scale_set_draw_value(app->progress_scale, FALSE);
     g_signal_connect(app->progress_scale, "change-value", G_CALLBACK(progress_changed), app);
     gtk_box_append(controls, GTK_WIDGET(app->progress_scale));
+    gtk_box_append(controls, make_track_menu(app, TRUE));
+    gtk_box_append(controls, make_track_menu(app, FALSE));
     gtk_box_append(controls, GTK_WIDGET(app->mute_button));
     gtk_box_append(controls, GTK_WIDGET(app->fullscreen_button));
     app->player_controls = GTK_REVEALER(gtk_revealer_new());
