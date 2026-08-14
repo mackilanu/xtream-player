@@ -13,10 +13,15 @@ Only use playlists and streams you are authorized to access.
 
 - Native GTK 4 and libadwaita interface
 - Xtream Codes-compatible live TV
+- Provider movie and series catalogs with category filtering and search
+- On-demand playback, episode selection, seeking, and automatic resume
+- Runtime audio-track and embedded-subtitle selection
 - Multiple named provider profiles
 - Password storage in GNOME Keyring
 - Provider categories and channel search
+- Per-playlist Live TV favorites with a dedicated favorites filter
 - Six-hour cache with offline fallback
+- One-click channel resync that bypasses the cache
 - Non-blocking network requests and virtualized channel lists
 - System, light, and dark appearance modes
 - Fullscreen video with auto-hiding controls
@@ -61,6 +66,19 @@ sudo dnf upgrade "$(find build/rpmbuild/RPMS -type f -name 'xtream-player-*.rpm'
   ! -name '*debuginfo*' ! -name '*debugsource*' -print -quit)"
 ```
 
+## Build a package (Arch Linux)
+
+Install the build tools, then use the included `PKGBUILD`:
+
+```sh
+sudo pacman -S --needed base-devel
+makepkg -si
+```
+
+`makepkg` downloads the pinned source revision, installs the declared runtime
+dependencies through pacman, builds the application, and creates an Arch
+package in the project directory.
+
 Choose **New playlist**, give it a name, and enter the provider server URL
 (including `http://` or `https://`), username, and password. Successful
 connections are saved as reusable profiles. Passwords are stored in GNOME
@@ -74,9 +92,13 @@ worker thread.
 
 ## Project status
 
-Xtream Player is an early-stage community project. VOD, series, EPG, favorites,
-and packaging are planned but not implemented yet. Bug reports and focused pull
-requests are welcome.
+Xtream Player is an early-stage community project. EPG, favorites, richer
+poster/detail views, and distribution packaging are still evolving. Bug reports
+and focused pull requests are welcome.
+
+Movie and series metadata comes directly from the configured Xtream provider;
+no separate metadata API key is required. Available artwork, ratings, titles,
+and episode details depend on the provider's catalog data.
 
 ## Privacy and legal use
 
