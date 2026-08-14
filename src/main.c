@@ -82,6 +82,7 @@ typedef struct {
     guint retry_timeout;
     char *current_url;
     char *current_title;
+    char *current_channel_id;
     gboolean retry_attempted;
     gboolean playing;
     gboolean muted;
@@ -466,8 +467,19 @@ static void channel_item_bind(GtkSignalListItemFactory *factory, GtkListItem *it
     gtk_label_set_text(GTK_LABEL(g_object_get_data(G_OBJECT(box), "title-label")),
                        gtk_string_object_get_string(object));
     GtkLabel *subtitle = GTK_LABEL(g_object_get_data(G_OBJECT(box), "subtitle-label"));
+    GtkWidget *title_label = g_object_get_data(G_OBJECT(box), "title-label");
     MediaItem *media = g_object_get_data(G_OBJECT(object), "media-item");
     Channel *channel = g_object_get_data(G_OBJECT(object), "channel");
+    gboolean is_playing = channel && app->current_channel_id &&
+                          g_strcmp0(channel->stream_id, app->current_channel_id) == 0;
+    if (is_playing)
+        gtk_widget_add_css_class(box, "now-playing-channel");
+    else
+        gtk_widget_remove_css_class(box, "now-playing-channel");
+    if (is_playing)
+        gtk_widget_add_css_class(title_label, "now-playing-title");
+    else
+        gtk_widget_remove_css_class(title_label, "now-playing-title");
     GtkToggleButton *favorite = GTK_TOGGLE_BUTTON(g_object_get_data(G_OBJECT(box), "favorite-button"));
     g_object_set_data(G_OBJECT(favorite), "binding", GINT_TO_POINTER(1));
     g_object_set_data(G_OBJECT(favorite), "channel", channel);
@@ -482,6 +494,9 @@ static void channel_item_bind(GtkSignalListItemFactory *factory, GtkListItem *it
             media->rating && media->rating[0] ? "  ★ " : "",
             media->rating && media->rating[0] ? media->rating : "");
         gtk_label_set_text(subtitle, details);
+        gtk_widget_set_visible(GTK_WIDGET(subtitle), TRUE);
+    } else if (is_playing) {
+        gtk_label_set_text(subtitle, "Now playing");
         gtk_widget_set_visible(GTK_WIDGET(subtitle), TRUE);
     } else {
         gtk_widget_set_visible(GTK_WIDGET(subtitle), FALSE);
@@ -991,6 +1006,10 @@ static gboolean player_bus_message(GstBus *bus, GstMessage *message, gpointer da
         } else {
             g_autofree char *message_text = g_strdup_printf("Playback failed: %s", error->message);
             flash_message(app, message_text);
+            if (!app->on_demand) {
+                g_clear_pointer(&app->current_channel_id, g_free);
+                rebuild_channel_model(app);
+            }
         }
     } else if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS) {
         app->playing = FALSE;
@@ -1059,6 +1078,9 @@ static void play_uri(App *app, const char *url, const char *title,
 }
 
 static void play_channel(App *app, Channel *channel) {
+    g_free(app->current_channel_id);
+    app->current_channel_id = g_strdup(channel->stream_id);
+    rebuild_channel_model(app);
     g_autofree char *user = g_uri_escape_string(app->user, NULL, TRUE);
     g_autofree char *pass = g_uri_escape_string(app->pass, NULL, TRUE);
     g_autofree char *url = g_strdup_printf("%s/live/%s/%s/%s.ts", app->base_url, user, pass, channel->stream_id);
@@ -1066,6 +1088,8 @@ static void play_channel(App *app, Channel *channel) {
 }
 
 static void play_media(App *app, MediaItem *item) {
+    g_clear_pointer(&app->current_channel_id, g_free);
+    rebuild_channel_model(app);
     g_autofree char *user = g_uri_escape_string(app->user, NULL, TRUE);
     g_autofree char *pass = g_uri_escape_string(app->pass, NULL, TRUE);
     g_autofree char *url = g_strdup_printf("%s/%s/%s/%s/%s.%s", app->base_url,
@@ -1382,6 +1406,7 @@ static void show_login(GtkButton *button, gpointer data) {
     App *app = data;
     save_progress(app);
     if (app->pipeline) gst_element_set_state(app->pipeline, GST_STATE_NULL);
+    g_clear_pointer(&app->current_channel_id, g_free);
     adw_view_stack_set_visible_child_name(app->stack, "login");
 }
 
@@ -1644,7 +1669,7 @@ static void app_free(gpointer data) {
     g_clear_object(&app->movie_model); g_clear_object(&app->movie_filter);
     g_clear_object(&app->series_model); g_clear_object(&app->series_filter);
     g_free(app->progress_key);
-    g_free(app->current_url); g_free(app->current_title);
+    g_free(app->current_url); g_free(app->current_title); g_free(app->current_channel_id);
     g_free(app->profile_id); g_free(app->base_url); g_free(app->user); g_free(app->pass); g_free(app);
 }
 
@@ -1670,7 +1695,12 @@ static void activate(GApplication *application, gpointer user_data) {
         "  border-radius: 14px; margin: 16px; padding: 4px;"
         "}"
         ".player-controls button { color: white; }"
-        ".player-controls label { color: white; }");
+        ".player-controls label { color: white; }"
+        ".now-playing-channel {"
+        "  background: alpha(@accent_bg_color, 0.16);"
+        "  border-radius: 10px;"
+        "}"
+        ".now-playing-title { font-weight: 700; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
         GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);
@@ -1685,12 +1715,12 @@ static void activate(GApplication *application, gpointer user_data) {
     GtkOverlay *overlay = GTK_OVERLAY(gtk_overlay_new());
     gtk_overlay_set_child(overlay, GTK_WIDGET(app->stack));
     app->toast_revealer = GTK_REVEALER(gtk_revealer_new());
-    gtk_revealer_set_transition_type(app->toast_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    gtk_revealer_set_transition_type(app->toast_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
     app->toast_label = GTK_LABEL(gtk_label_new(""));
     gtk_widget_add_css_class(GTK_WIDGET(app->toast_label), "toast");
     gtk_widget_set_halign(GTK_WIDGET(app->toast_revealer), GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(GTK_WIDGET(app->toast_revealer), GTK_ALIGN_START);
-    gtk_widget_set_margin_top(GTK_WIDGET(app->toast_revealer), 12);
+    gtk_widget_set_valign(GTK_WIDGET(app->toast_revealer), GTK_ALIGN_END);
+    gtk_widget_set_margin_bottom(GTK_WIDGET(app->toast_revealer), 24);
     gtk_revealer_set_child(app->toast_revealer, GTK_WIDGET(app->toast_label));
     gtk_overlay_add_overlay(overlay, GTK_WIDGET(app->toast_revealer));
     adw_application_window_set_content(app->window, GTK_WIDGET(overlay));
