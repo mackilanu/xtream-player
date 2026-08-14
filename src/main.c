@@ -77,6 +77,11 @@ typedef struct {
     GSettings *interface_settings;
     guint theme_mode;
     GstElement *pipeline;
+    guint bus_watch;
+    guint retry_timeout;
+    char *current_url;
+    char *current_title;
+    gboolean retry_attempted;
     gboolean playing;
     gboolean muted;
     gboolean fullscreen;
@@ -890,38 +895,107 @@ static gboolean progress_changed(GtkRange *range, GtkScrollType scroll, double v
     return FALSE;
 }
 
+static void destroy_pipeline(App *app) {
+    if (!app->pipeline) return;
+    if (app->bus_watch) {
+        g_source_remove(app->bus_watch);
+        app->bus_watch = 0;
+    }
+    gst_element_set_state(app->pipeline, GST_STATE_NULL);
+    GstStateChangeReturn stopped = gst_element_get_state(
+        app->pipeline, NULL, NULL, 3 * GST_SECOND);
+    if (stopped == GST_STATE_CHANGE_ASYNC)
+        g_warning("Timed out while stopping the previous stream");
+    gtk_picture_set_paintable(app->video, NULL);
+    gst_object_unref(app->pipeline);
+    app->pipeline = NULL;
+}
+
+static gboolean retry_current_stream(gpointer data);
+
+static gboolean player_bus_message(GstBus *bus, GstMessage *message, gpointer data) {
+    (void)bus;
+    App *app = data;
+    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+        g_autoptr(GError) error = NULL;
+        g_autofree char *debug = NULL;
+        gst_message_parse_error(message, &error, &debug);
+        g_warning("Playback failed: %s%s%s", error->message,
+                  debug ? " — " : "", debug ? debug : "");
+        app->playing = FALSE;
+        gtk_button_set_icon_name(app->play_button, "media-playback-start-symbolic");
+        if (!app->on_demand && !app->retry_attempted && app->current_url) {
+            app->retry_attempted = TRUE;
+            flash_message(app, "Stream failed — retrying…");
+            app->retry_timeout = g_timeout_add(750, retry_current_stream, app);
+        } else {
+            g_autofree char *message_text = g_strdup_printf("Playback failed: %s", error->message);
+            flash_message(app, message_text);
+        }
+    } else if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS) {
+        app->playing = FALSE;
+        gtk_button_set_icon_name(app->play_button, "media-playback-start-symbolic");
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean create_and_start_pipeline(App *app) {
+    destroy_pipeline(app);
+    app->pipeline = gst_element_factory_make("playbin", "player");
+    GstElement *sink = gst_element_factory_make("gtk4paintablesink", "video-sink");
+    if (!app->pipeline || !sink) {
+        flash_message(app, "The GStreamer GTK 4 video plugin is missing.");
+        if (sink) gst_object_unref(sink);
+        destroy_pipeline(app);
+        return FALSE;
+    }
+    g_object_set(app->pipeline, "video-sink", sink, "uri", app->current_url, NULL);
+    GdkPaintable *paintable = NULL;
+    g_object_get(sink, "paintable", &paintable, NULL);
+    gtk_picture_set_paintable(app->video, paintable);
+    g_clear_object(&paintable);
+    gst_object_unref(sink);
+    GstBus *bus = gst_element_get_bus(app->pipeline);
+    app->bus_watch = gst_bus_add_watch(bus, player_bus_message, app);
+    gst_object_unref(bus);
+    GstStateChangeReturn started = gst_element_set_state(app->pipeline, GST_STATE_PLAYING);
+    if (started == GST_STATE_CHANGE_FAILURE) {
+        flash_message(app, "The stream could not be started.");
+        destroy_pipeline(app);
+        return FALSE;
+    }
+    app->playing = TRUE;
+    gtk_button_set_icon_name(app->play_button, "media-playback-pause-symbolic");
+    return TRUE;
+}
+
+static gboolean retry_current_stream(gpointer data) {
+    App *app = data;
+    app->retry_timeout = 0;
+    create_and_start_pipeline(app);
+    return G_SOURCE_REMOVE;
+}
+
 static void play_uri(App *app, const char *url, const char *title,
                      gboolean on_demand, const char *progress_identity) {
     save_progress(app);
-    if (!app->pipeline) {
-        app->pipeline = gst_element_factory_make("playbin", "player");
-        GstElement *sink = gst_element_factory_make("gtk4paintablesink", "video-sink");
-        if (!app->pipeline || !sink) {
-            flash_message(app, "The GStreamer GTK 4 video plugin is missing.");
-            if (sink) gst_object_unref(sink);
-            return;
-        }
-        g_object_set(app->pipeline, "video-sink", sink, NULL);
-        GdkPaintable *paintable = NULL;
-        g_object_get(sink, "paintable", &paintable, NULL);
-        gtk_picture_set_paintable(app->video, paintable);
-        g_clear_object(&paintable);
-        gst_object_unref(sink);
+    if (app->retry_timeout) {
+        g_source_remove(app->retry_timeout);
+        app->retry_timeout = 0;
     }
-    /* playbin must leave PLAYING before its URI can be replaced reliably. */
-    gst_element_set_state(app->pipeline, GST_STATE_NULL);
-    gst_element_get_state(app->pipeline, NULL, NULL, GST_SECOND);
-    g_object_set(app->pipeline, "uri", url, NULL);
-    gst_element_set_state(app->pipeline, GST_STATE_PLAYING);
+    g_free(app->current_url);
+    g_free(app->current_title);
+    app->current_url = g_strdup(url);
+    app->current_title = g_strdup(title);
+    app->retry_attempted = FALSE;
     app->on_demand = on_demand;
     gtk_widget_set_visible(GTK_WIDGET(app->progress_scale), on_demand);
     g_free(app->progress_key);
     app->progress_key = progress_identity ? g_compute_checksum_for_string(
         G_CHECKSUM_SHA256, progress_identity, -1) : NULL;
-    if (on_demand) g_timeout_add(700, resume_playback, app);
-    app->playing = TRUE;
     gtk_label_set_text(app->now_playing, title);
-    gtk_button_set_icon_name(app->play_button, "media-playback-pause-symbolic");
+    if (create_and_start_pipeline(app) && on_demand)
+        g_timeout_add(700, resume_playback, app);
 }
 
 static void play_channel(App *app, Channel *channel) {
@@ -1488,10 +1562,8 @@ static GtkWidget *build_player(App *app) {
 static void app_free(gpointer data) {
     App *app = data;
     save_progress(app);
-    if (app->pipeline) {
-        gst_element_set_state(app->pipeline, GST_STATE_NULL);
-        gst_object_unref(app->pipeline);
-    }
+    if (app->retry_timeout) g_source_remove(app->retry_timeout);
+    destroy_pipeline(app);
     if (app->controls_timeout) g_source_remove(app->controls_timeout);
     if (app->progress_timer) g_source_remove(app->progress_timer);
     g_clear_object(&app->interface_settings);
@@ -1508,6 +1580,7 @@ static void app_free(gpointer data) {
     g_clear_object(&app->movie_model); g_clear_object(&app->movie_filter);
     g_clear_object(&app->series_model); g_clear_object(&app->series_filter);
     g_free(app->progress_key);
+    g_free(app->current_url); g_free(app->current_title);
     g_free(app->profile_id); g_free(app->base_url); g_free(app->user); g_free(app->pass); g_free(app);
 }
 
