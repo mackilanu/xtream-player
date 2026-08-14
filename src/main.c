@@ -1270,8 +1270,15 @@ static void track_selected(GtkButton *button, gpointer data) {
     App *app = data;
     gboolean audio = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "audio"));
     int index = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "track-index"));
-    if (app->pipeline)
+    if (app->pipeline) {
         g_object_set(app->pipeline, audio ? "current-audio" : "current-text", index, NULL);
+        if (audio) {
+            const char *label = g_object_get_data(G_OBJECT(button), "track-label");
+            g_autofree char *message = g_strdup_printf("Audio: %s",
+                label ? label : (index == -1 ? "Automatic (provider default)" : "Selected track"));
+            flash_message(app, message);
+        }
+    }
     GtkWidget *popover = gtk_widget_get_ancestor(GTK_WIDGET(button), GTK_TYPE_POPOVER);
     if (popover) gtk_popover_popdown(GTK_POPOVER(popover));
 }
@@ -1284,6 +1291,7 @@ static void append_track_button(GtkBox *box, App *app, gboolean audio,
     gtk_widget_set_halign(GTK_WIDGET(button), GTK_ALIGN_FILL);
     g_object_set_data(G_OBJECT(button), "audio", GINT_TO_POINTER(audio));
     g_object_set_data(G_OBJECT(button), "track-index", GINT_TO_POINTER(index));
+    g_object_set_data_full(G_OBJECT(button), "track-label", g_strdup(label), g_free);
     g_signal_connect(button, "clicked", G_CALLBACK(track_selected), app);
     gtk_box_append(box, GTK_WIDGET(button));
 }
@@ -1304,7 +1312,10 @@ static void refresh_track_menu(GtkPopover *popover, gpointer data) {
     int count = 0, current = -1;
     g_object_get(app->pipeline, audio ? "n-audio" : "n-text", &count,
                  audio ? "current-audio" : "current-text", &current, NULL);
-    if (!audio) append_track_button(box, app, FALSE, -1, current, "Subtitles Off");
+    if (audio)
+        append_track_button(box, app, TRUE, -1, current, "Automatic (provider default)");
+    else
+        append_track_button(box, app, FALSE, -1, current, "Subtitles Automatic");
     for (int i = 0; i < count; i++) {
         g_autofree char *label = track_label(app, audio, i);
         append_track_button(box, app, audio, i, current, label);
