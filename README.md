@@ -66,6 +66,19 @@ sudo dnf upgrade "$(find build/rpmbuild/RPMS -type f -name 'xtream-player-*.rpm'
   ! -name '*debuginfo*' ! -name '*debugsource*' -print -quit)"
 ```
 
+## Build a package (Arch Linux)
+
+Install the build tools, then use the included `PKGBUILD`:
+
+```sh
+sudo pacman -S --needed base-devel
+makepkg -si
+```
+
+`makepkg` downloads the pinned source revision, installs the declared runtime
+dependencies through pacman, builds the application, and creates an Arch
+package in the project directory.
+
 Choose **New playlist**, give it a name, and enter the provider server URL
 (including `http://` or `https://`), username, and password. Successful
 connections are saved as reusable profiles. Passwords are stored in GNOME
