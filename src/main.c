@@ -420,6 +420,8 @@ static void favorite_toggled(GtkToggleButton *button, gpointer data) {
         g_hash_table_remove(app->favorites, channel->stream_id);
     gtk_button_set_icon_name(GTK_BUTTON(button), gtk_toggle_button_get_active(button)
                              ? "starred-symbolic" : "non-starred-symbolic");
+    gtk_widget_set_tooltip_text(GTK_WIDGET(button), gtk_toggle_button_get_active(button)
+                                ? "Remove from favorites" : "Add to favorites");
     save_favorites(app);
     if (gtk_drop_down_get_selected(app->category_picker) == 1) rebuild_channel_model(app);
 }
@@ -450,9 +452,12 @@ static void channel_item_setup(GtkSignalListItemFactory *factory, GtkListItem *i
     gtk_button_set_icon_name(GTK_BUTTON(favorite), "non-starred-symbolic");
     gtk_widget_set_tooltip_text(GTK_WIDGET(favorite), "Add to favorites");
     gtk_widget_add_css_class(GTK_WIDGET(favorite), "flat");
+    gtk_widget_add_css_class(GTK_WIDGET(favorite), "favorite-button");
+    gtk_widget_set_size_request(GTK_WIDGET(favorite), 36, 36);
+    gtk_widget_set_halign(GTK_WIDGET(favorite), GTK_ALIGN_END);
+    gtk_widget_set_valign(GTK_WIDGET(favorite), GTK_ALIGN_CENTER);
     g_signal_connect(favorite, "toggled", G_CALLBACK(favorite_toggled), app);
     gtk_box_append(box, GTK_WIDGET(favorite));
-    gtk_box_append(box, gtk_image_new_from_icon_name("media-playback-start-symbolic"));
     g_object_set_data(G_OBJECT(box), "title-label", label);
     g_object_set_data(G_OBJECT(box), "subtitle-label", subtitle);
     g_object_set_data(G_OBJECT(box), "favorite-button", favorite);
@@ -488,6 +493,8 @@ static void channel_item_bind(GtkSignalListItemFactory *factory, GtkListItem *it
                                  g_hash_table_contains(app->favorites, channel->stream_id));
     gtk_button_set_icon_name(GTK_BUTTON(favorite), gtk_toggle_button_get_active(favorite)
                              ? "starred-symbolic" : "non-starred-symbolic");
+    gtk_widget_set_tooltip_text(GTK_WIDGET(favorite), gtk_toggle_button_get_active(favorite)
+                                ? "Remove from favorites" : "Add to favorites");
     g_object_set_data(G_OBJECT(favorite), "binding", GINT_TO_POINTER(0));
     if (media) {
         g_autofree char *details = g_strdup_printf("%s%s%s", media->series ? "Series" : "Movie",
